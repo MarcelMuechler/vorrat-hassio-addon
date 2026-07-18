@@ -13,22 +13,46 @@ ARG VORRAT_REF=v0.19.0
 # both build stages below.
 ARG BUILD_FROM=ghcr.io/home-assistant/base:3.23
 
-FROM ghcr.io/cirruslabs/flutter:stable AS webbuilder
+# Cloned once and reused by both the web build and the backend dependency
+# resolution below, so the pinned tag is only fetched from GitHub a single
+# time per build.
+FROM ${BUILD_FROM} AS source
+RUN apk add --no-cache git
 ARG VORRAT_REF
 RUN git clone --depth 1 --branch "${VORRAT_REF}" https://github.com/MarcelMuechler/vorrat.git /src
+
+FROM ghcr.io/cirruslabs/flutter:stable AS webbuilder
+COPY --from=source /src/frontend /src/frontend
 # Matches the same marker main.py expects for the HA Ingress base-href
 # rewrite (see the main repo's vorrat/Dockerfile) — without this flag,
 # Flutter's default base href ships instead and Ingress breaks.
 RUN cd /src/frontend && flutter build web --base-href=/__INGRESS_BASE__/
 
+# uv's official distroless image ships a statically-linked (musl-compatible)
+# binary — copying just the executable out of it is the documented way to
+# add uv to another base image.
+FROM ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa AS uv
+
+# Resolve the backend's *locked* dependency set (backend/uv.lock at the
+# pinned tag) into a venv instead of a hand-maintained pip install list here
+# — a hardcoded list silently drifts from the real dependencies, which is
+# exactly what broke python-multipart after the main repo added it (#210,
+# #212) but this Dockerfile's old list was never updated to match.
+FROM ${BUILD_FROM} AS backend-builder
+RUN apk add --no-cache python3
+COPY --from=uv /uv /usr/local/bin/uv
+WORKDIR /app
+COPY --from=source /src/backend/pyproject.toml /src/backend/uv.lock /app/
+RUN uv sync --frozen --no-install-project --no-dev
+
 FROM ${BUILD_FROM} AS runtime
 
-RUN apk add --no-cache python3 py3-pip \
-    && pip install --break-system-packages --no-cache-dir \
-        fastapi "uvicorn[standard]" sqlalchemy alembic httpx pydantic-settings
+RUN apk upgrade --no-cache && apk add --no-cache python3
 
 WORKDIR /app
-COPY --from=webbuilder /src/backend /app
+COPY --from=source /src/backend /app
+COPY --from=backend-builder /app/.venv /app/.venv
+ENV PATH="/app/.venv/bin:${PATH}"
 COPY --from=webbuilder /src/frontend/build/web /app/app/static
 COPY rootfs /
 
