@@ -6,7 +6,7 @@
 # this also busts Docker's build cache for the RUN below, since the resolved
 # command text changes with it. A floating ref like "main" would cache-hit
 # forever and silently keep serving whatever was cloned on the first build.
-ARG VORRAT_REF=v0.18.1
+ARG VORRAT_REF=v0.18.2
 
 # Supervisor no longer auto-injects BUILD_FROM (since 2026.04.0), so it needs
 # an explicit default here. Declared before any FROM so it's in scope for
